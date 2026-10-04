@@ -20,13 +20,9 @@ Sentry.init({
 });
 import { 
   checkDBHealth as checkDatabaseHealth, 
-  migrate, 
-  getPool 
+  migrate
 } from "./utils/postgresClient";
-import { 
-  checkRedisHealth, 
-  closeRedis 
-} from "./utils/redisClient";
+import { checkRedisHealth } from "./utils/redisClient";
 import { 
   checkStorageHealth, 
   ensureBucket 

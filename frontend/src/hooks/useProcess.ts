@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { processDocument, getStatus, type JobStatus } from "../services/api";
 import { friendlyError, trackError, trackUserAction } from "../utils/helpers";
 import type { AiConfig } from "../components/upload/ModelSelector";
@@ -23,6 +23,9 @@ export function useProcess(onComplete: (jobId: string) => void): UseProcessRetur
     if (timer.current) { clearInterval(timer.current); timer.current = null; }
   };
 
+  // Stop polling if the page unmounts mid-job.
+  useEffect(() => stop, []);
+
   const trigger = useCallback(async (job_id: string, ocr: string, ai: string, config?: AiConfig) => {
     setLoading(true);
     setError(null);
@@ -30,6 +33,7 @@ export function useProcess(onComplete: (jobId: string) => void): UseProcessRetur
     try {
       await processDocument(job_id, ocr, ai, config);
       setStatus("processing");
+      stop();
       let polls = 0;
       timer.current = setInterval(async () => {
         polls++;

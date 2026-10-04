@@ -10,3 +10,10 @@ env/
 *.log
 .DS_Store
 .kluster/
+.env.*
+!.env.example
+!.env.production
+backend/lib/
+backend/.test-build/
+.firebase/
+logs/

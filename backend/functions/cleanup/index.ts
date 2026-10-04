@@ -5,6 +5,7 @@ import { deleteFile, checkFileExists } from "../utils/minioClient";
 import { deleteJobKeys }           from "../utils/redisClient";
 import { getJob, updateJobStatus } from "../utils/postgresClient";
 import { logger } from "../utils/logger";
+import { STORED_EXTENSIONS } from "../utils/fileTypes";
 
 const router = express.Router();
 
@@ -27,9 +28,8 @@ router.delete("/:job_id", async (req: Request, res: Response): Promise<void> => 
     const warnings: string[] = [];
 
     // 2. Delete file from MinIO (verify existence first, then delete)
-    const extensions = ["pdf", "jpg", "jpeg", "png", "webp"];
     let deleted = false;
-    for (const ext of extensions) {
+    for (const ext of STORED_EXTENSIONS) {
       const objectName = `uploads/${job_id}/file.${ext}`;
       try {
         const exists = await checkFileExists(objectName);

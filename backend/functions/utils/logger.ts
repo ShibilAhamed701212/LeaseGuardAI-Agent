@@ -22,7 +22,7 @@ interface CrashReport {
   recoveryAction?: string;
 }
 
-interface BugPrediction {
+export interface BugPrediction {
   id: string;
   timestamp: string;
   issue: string;

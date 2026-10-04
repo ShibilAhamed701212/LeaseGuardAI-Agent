@@ -5,8 +5,10 @@ import { getClient, storeResult, setJobStatus } from "./utils/redisClient";
 import { updateJobStatus as updatePgStatus } from "./utils/postgresClient";
 import * as Sentry from "@sentry/node";
 import { logger } from "./utils/logger";
+import { mimeFromUrl } from "./utils/fileTypes";
 
 const POLL_INTERVAL = 3000;
+const GEMINI_TIMEOUT_MS = 60_000;
 const redis = getClient();
 
 interface AiConfig {
@@ -136,12 +138,15 @@ async function processGemini(buffer: Buffer, mimeType: string, config?: AiConfig
   if (modelName === "gemini") modelName = "gemini-2.5-flash";
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ 
-    model: modelName,
-    generationConfig: {
-      responseMimeType: "application/json"
-    }
-  });
+  const model = genAI.getGenerativeModel(
+    {
+      model: modelName,
+      generationConfig: {
+        responseMimeType: "application/json"
+      }
+    },
+    { timeout: GEMINI_TIMEOUT_MS }
+  );
 
   const prompt = `You are a legal-financial contract analyzer specialized in vehicle lease agreements.
 
@@ -185,21 +190,18 @@ STRICT JSON FORMAT:
   };
 
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout for AI
-
     const response = await model.generateContent([
       { text: prompt },
       { inlineData }
     ]);
 
-    clearTimeout(timeoutId);
-
     const text = response.response.text();
     if (!text) throw new Error("Empty response from Gemini");
     return parseJsonResponse(text);
   } catch (err: any) {
-    if (err.name === "AbortError") throw new Error("Gemini AI request timed out (60s limit reached)");
+    if (err.name === "AbortError" || /abort/i.test(err.message ?? "")) {
+      throw new Error("Gemini AI request timed out (60s limit reached)");
+    }
     logger.error("Gemini AI fetch failed", { error: err.message });
     throw new Error(`Gemini AI failed: ${err.message}`);
   }
@@ -239,7 +241,8 @@ function parseJsonResponse(text: string): any {
   try {
     return JSON.parse(cleaned);
   } catch (err) {
-    logger.warn("Failed to parse AI output, returning fallback JSON", { cleaned });
+    // Log only the length: the raw output contains contract data, which must not reach server logs.
+    logger.warn("Failed to parse AI output, returning fallback JSON", { outputLength: cleaned.length });
     return {
       apr: null, monthly_payment: null, term: null, 
       residual_value: null, mileage_limit: null, penalties: null
@@ -257,8 +260,7 @@ async function processJob(job: WorkerJob) {
   try {
     await setJobStatus(job.job_id, "reading_document").catch(() => null);
     const fileBuffer = await downloadFileBuffer(job.file_url);
-    const isPdf = job.file_url.toLowerCase().includes(".pdf?");
-    const mimeType = isPdf ? "application/pdf" : "image/jpeg";
+    const mimeType = mimeFromUrl(job.file_url);
 
     let sla = null;
 
@@ -350,8 +352,13 @@ async function healOrphanedJobs() {
          SET status = 'failed', updated_at = NOW()
        WHERE status = 'processing' 
          AND updated_at < NOW() - INTERVAL '5 minutes'
+   RETURNING job_id
     `);
     if (res.rowCount > 0) {
+      // /status reads Redis first, so the cached intermediate status must be overwritten too.
+      for (const row of res.rows as { job_id: string }[]) {
+        await setJobStatus(row.job_id, "failed").catch(() => null);
+      }
       logger.info(`Self-healing: recovered ${res.rowCount} orphaned processing jobs.`);
     }
   } catch (err: any) {

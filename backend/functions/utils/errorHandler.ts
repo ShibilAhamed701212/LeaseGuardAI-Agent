@@ -1,6 +1,6 @@
 // utils/errorHandler.ts — Anti-crash system with global error handling and automatic recovery
 
-import { logger, recordCrash, getBugPredictions, BugPrediction } from "./logger";
+import { logger, recordCrash, getBugPredictions, type BugPrediction } from "./logger";
 import { getPool, closePool } from "./postgresClient";
 import { getClient as getRedis, closeRedis } from "./redisClient";
 

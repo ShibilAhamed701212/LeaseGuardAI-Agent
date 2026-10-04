@@ -12,7 +12,7 @@ env:
 jobs:
   # ── Lint & Type-check Backend ────────────────────────────────
   backend-check:
-    name: Backend — Lint & Build
+    name: Backend — Type-check, Test & Build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -32,12 +32,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: TypeScript compile
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Bundle
         run: npm run build
 
   # ── Lint & Build Frontend ───────────────────────────────────
   frontend-check:
-    name: Frontend — Lint & Build
+    name: Frontend — Type-check & Build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -81,12 +87,20 @@ jobs:
     needs: [backend-check]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
+    env:
+      RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+
     steps:
       - name: Trigger Render Deploy
+        if: env.RENDER_DEPLOY_HOOK_URL != ''
         run: |
-          curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}" \
+          curl -X POST "$RENDER_DEPLOY_HOOK_URL" \
             -H "Content-Type: application/json" \
             --fail --silent --show-error
+
+      - name: Skip (deploy hook not configured)
+        if: env.RENDER_DEPLOY_HOOK_URL == ''
+        run: echo "::notice::RENDER_DEPLOY_HOOK_URL secret is not set; skipping Render deploy."
 
   # ── Deploy Frontend to Firebase Hosting (main branch only) ──
   deploy-frontend:
@@ -94,21 +108,31 @@ jobs:
     runs-on: ubuntu-latest
     needs: [frontend-check]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    env:
+      HAS_FIREBASE_SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT != '' }}
 
     steps:
+      - name: Skip (service account not configured)
+        if: env.HAS_FIREBASE_SA != 'true'
+        run: echo "::notice::FIREBASE_SERVICE_ACCOUNT secret is not set; skipping Firebase deploy."
+
       - name: Checkout
+        if: env.HAS_FIREBASE_SA == 'true'
         uses: actions/checkout@v4
 
       - name: Setup Node.js
+        if: env.HAS_FIREBASE_SA == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Install & Build Frontend
+        if: env.HAS_FIREBASE_SA == 'true'
         working-directory: frontend
         run: npm ci && npm run build
 
       - name: Deploy to Firebase Hosting
+        if: env.HAS_FIREBASE_SA == 'true'
         uses: FirebaseExtended/action-hosting-deploy@v0
         with:
           repoToken: ${{ secrets.GITHUB_TOKEN }}
