@@ -7,10 +7,10 @@ import { v4 as uuidv4 } from "uuid";
 import { uploadFile, deleteFile } from "../utils/minioClient";
 import { createJob } from "../utils/postgresClient";
 import { logger } from "../utils/logger";
+import { ALLOWED_MIME, objectNameFor } from "../utils/fileTypes";
 
 const router = express.Router();
 
-const ALLOWED_MIME = ["application/pdf", "image/jpeg", "image/png", "image/webp"];
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
 
 router.post("/", async (req: Request, res: Response): Promise<void> => {
@@ -31,6 +31,7 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
   let fileUploaded = false;
   let fileError = "";
   let fileName = "";
+  let objectName = "";
   let isAborted = false;
   const job_id = uuidv4();
 
@@ -66,8 +67,7 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
     }
 
     fileUploaded = true;
-    const ext = filename.split(".").pop() ?? "bin";
-    const objectName = `uploads/${job_id}/file.${ext}`;
+    objectName = objectNameFor(job_id, mimeType);
 
     // Read the entire stream into a Buffer
     const chunks: Buffer[] = [];
@@ -111,12 +111,7 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
   busboy.on("finish", async () => {
     if (res.headersSent || isAborted) return;
 
-    let objectName = "";
     try {
-      // Create objectName early for cleanup in catch block
-      const ext = fileName.split(".").pop() ?? "bin";
-      objectName = `uploads/${job_id}/file.${ext}`;
-
       // 1. Wait for all file upload promises to complete to ensure field and file processing is completely settled
       await Promise.all(uploadPromises);
 

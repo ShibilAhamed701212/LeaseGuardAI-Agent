@@ -6,6 +6,7 @@ import { pushJob, setJobStatus }   from "../utils/redisClient";
 import { getSignedUrl, checkFileExists } from "../utils/minioClient";
 import { triggerN8nWebhook }       from "../utils/n8nClient";
 import { logger } from "../utils/logger";
+import { STORED_EXTENSIONS } from "../utils/fileTypes";
 
 const router = express.Router();
 
@@ -62,9 +63,8 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
     }
 
     // 2. Find uploaded file in MinIO (verify existence with HeadObject, then sign)
-    const extensions = ["pdf", "jpg", "jpeg", "png", "webp"];
     let file_url   = "";
-    for (const ext of extensions) {
+    for (const ext of STORED_EXTENSIONS) {
       const objectName = `uploads/${job_id}/file.${ext}`;
       try {
         const exists = await checkFileExists(objectName);
@@ -90,8 +90,11 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
     // 5. Push to Redis queue
     await pushJob(job_id, { ocr, ai, file_url, config });
 
-    // 6. Trigger n8n webhook
-    await triggerN8nWebhook({ job_id, file_url, ocr, ai, config });
+    // 6. Notify n8n (optional). The job is already queued and the worker does
+    // the processing, so a webhook failure must not mark the job as failed.
+    await triggerN8nWebhook({ job_id, file_url, ocr, ai }).catch((err: Error) => {
+      logger.warn("n8n webhook failed; job remains queued", { job_id, message: err.message });
+    });
 
     logger.info("Processing triggered", { job_id, ocr, ai });
 

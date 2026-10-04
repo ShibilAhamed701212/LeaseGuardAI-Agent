@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { useNavigate }    from "react-router-dom";
 import { FileUploader }   from "../components/upload/FileUploader";
 import { ModelSelector, type OcrEngine, type AiModel, type AiConfig } from "../components/upload/ModelSelector";
@@ -28,6 +28,11 @@ export function Upload() {
 
   const isRunning = uploading || processing;
   const error     = upErr || procErr;
+
+  // A failed run must release the submit guard, otherwise "Retry Analysis" does nothing.
+  useEffect(() => {
+    if (error) submitting.current = false;
+  }, [error]);
 
   const getLoaderMessage = () => {
     if (uploading) return "Uploading document...";
