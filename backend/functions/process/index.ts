@@ -7,6 +7,7 @@ import { getSignedUrl, checkFileExists } from "../utils/minioClient";
 import { triggerN8nWebhook }       from "../utils/n8nClient";
 import { logger } from "../utils/logger";
 import { STORED_EXTENSIONS } from "../utils/fileTypes";
+import { assertSafeEndpoint } from "../utils/security";
 
 const router = express.Router();
 
@@ -44,6 +45,19 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
   if (!ai || !(VALID_AI as readonly string[]).includes(ai)) {
     res.status(400).json({ error: `Invalid ai model. Must be one of: ${VALID_AI.join(", ")}` });
     return;
+  }
+
+  if (config?.baseUrl !== undefined) {
+    if (typeof config.baseUrl !== "string") {
+      res.status(400).json({ error: "config.baseUrl must be a string" });
+      return;
+    }
+    try {
+      await assertSafeEndpoint(config.baseUrl);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+      return;
+    }
   }
 
   try {

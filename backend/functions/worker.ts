@@ -1,11 +1,13 @@
 // worker.ts — Standalone AI/OCR Queue Processor
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import pdfParse from "pdf-parse";
-import { getClient, storeResult, setJobStatus } from "./utils/redisClient";
+import { getClient, storeResult, setJobStatus, deleteJobKeys } from "./utils/redisClient";
+import { deleteFile } from "./utils/minioClient";
 import { updateJobStatus as updatePgStatus } from "./utils/postgresClient";
 import * as Sentry from "@sentry/node";
 import { logger } from "./utils/logger";
-import { mimeFromUrl } from "./utils/fileTypes";
+import { mimeFromUrl, STORED_EXTENSIONS } from "./utils/fileTypes";
+import { assertSafeEndpoint } from "./utils/security";
 
 const POLL_INTERVAL = 3000;
 const GEMINI_TIMEOUT_MS = 60_000;
@@ -103,6 +105,8 @@ async function extractTextWithPdfParse(buffer: Buffer, mimeType: string, config?
 async function processOllama(text: string, config?: AiConfig): Promise<any> {
   const baseUrl = config?.baseUrl || DEFAULT_OLLAMA_URL;
   const model = config?.modelName || "llama3.2"; // smallest model default
+  // Only client-supplied URLs are checked; the server's own OLLAMA_HOST is trusted.
+  if (config?.baseUrl) await assertSafeEndpoint(config.baseUrl);
   
   const prompt = `Extract structured SLA data from this lease contract. 
 Return ONLY valid JSON with keys: {apr, monthly_payment, term, residual_value, mileage_limit, penalties}. 
@@ -117,6 +121,7 @@ No markdown. No explanation. Data:\n\n${text}`;
         stream: false,
         prompt,
       }),
+      redirect: config?.baseUrl ? "error" : "follow",
     });
 
     if (!response.ok) throw new Error(`Ollama API error: ${response.status}`);
@@ -212,6 +217,7 @@ async function processCustomOpenAi(text: string, config?: AiConfig): Promise<any
     throw new Error("Custom Custom Node requires Base URL and API Key");
   }
   const model = config.modelName || "gpt-3.5-turbo";
+  await assertSafeEndpoint(config.baseUrl);
 
   const prompt = `Extract structured SLA data from this lease contract. Return ONLY raw JSON: {"apr": null, "monthly_payment": null, "term": null, "residual_value": null, "mileage_limit": null, "penalties": null}. No markdown.\n\n${text}`;
 
@@ -226,11 +232,12 @@ async function processCustomOpenAi(text: string, config?: AiConfig): Promise<any
       temperature: 0,
       messages: [{ role: "user", content: prompt }]
     }),
+    redirect: "error",
   });
 
   if (!response.ok) {
     const txt = await response.text();
-    throw new Error(`OpenAI API Error: ${response.status} - ${txt}`);
+    throw new Error(`OpenAI API Error: ${response.status} - ${txt.slice(0, 200)}`);
   }
   const data: any = await response.json();
   return parseJsonResponse(data.choices?.[0]?.message?.content || "");
@@ -366,11 +373,50 @@ async function healOrphanedJobs() {
   }
 }
 
+/**
+ * Retention: delete uploaded files and cached results for jobs older than
+ * FILE_RETENTION_HOURS (default 24) and mark them "deleted", so uploads do not
+ * stay in the bucket indefinitely when the client never calls /cleanup.
+ */
+const FILE_RETENTION_HOURS = parseInt(process.env.FILE_RETENTION_HOURS ?? "24", 10) || 24;
+
+async function purgeExpiredJobs() {
+  try {
+    const pool = require("./utils/postgresClient").getPool();
+    const res = await pool.query(
+      `SELECT job_id FROM jobs
+        WHERE status IN ('uploaded', 'completed', 'failed')
+          AND created_at < NOW() - make_interval(hours => $1)
+        ORDER BY created_at
+        LIMIT 100`,
+      [FILE_RETENTION_HOURS]
+    );
+    let purged = 0;
+    for (const { job_id } of res.rows as { job_id: string }[]) {
+      try {
+        // S3 DeleteObject succeeds for missing keys, so every candidate extension can be deleted directly.
+        await Promise.all(STORED_EXTENSIONS.map((ext) => deleteFile(`uploads/${job_id}/file.${ext}`)));
+        await deleteJobKeys(job_id).catch(() => null);
+        await updatePgStatus(job_id, "deleted");
+        purged++;
+      } catch (err: any) {
+        logger.warn("Retention purge failed for job", { job_id, error: err.message });
+      }
+    }
+    if (purged > 0) {
+      logger.info(`Retention: purged ${purged} jobs older than ${FILE_RETENTION_HOURS}h.`);
+    }
+  } catch (err: any) {
+    logger.warn("Retention purge failed", { error: err.message });
+  }
+}
+
 export function startWorker() {
   logger.info("Starting Background AI Worker engine...");
   
   // 1. Immediate healing on startup
   healOrphanedJobs().catch(() => null);
+  purgeExpiredJobs().catch(() => null);
 
   // 2. Main loop
   setInterval(async () => {
@@ -395,7 +441,10 @@ export function startWorker() {
 
   // 3. Periodic healing (every 5 minutes)
   setInterval(() => {
-    if (!isWorking) healOrphanedJobs().catch(() => null);
+    if (!isWorking) {
+      healOrphanedJobs().catch(() => null);
+      purgeExpiredJobs().catch(() => null);
+    }
   }, 300000); // 5 min
 }
 

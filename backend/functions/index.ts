@@ -7,6 +7,7 @@ import * as Sentry from "@sentry/node";
 import { nodeProfilingIntegration } from "@sentry/profiling-node";
 import { logger } from "./utils/logger";
 import { setupGlobalErrorHandlers, runDiagnostic } from "./utils/errorHandler";
+import { canViewDiagnostics, requireDiagnostics, rateLimit } from "./utils/security";
 
 // ── Sentry Initialization ─────────────────────────────────────
 Sentry.init({
@@ -43,8 +44,14 @@ const port = process.env.PORT || 10000;
 
 // ── Basic Middleware ──────────────────────────────────────────
 
-app.use(cors());
-app.use(express.json());
+// Behind Render's proxy, trust one hop so req.ip (used by rate limiting) is the client's address.
+const trustProxy = process.env.TRUST_PROXY ?? (process.env.NODE_ENV === "production" ? "1" : "");
+if (trustProxy) app.set("trust proxy", /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy);
+
+// CORS_ORIGINS: comma-separated allow-list; unset keeps the previous allow-all behaviour.
+const corsOrigins = process.env.CORS_ORIGINS?.split(",").map((o) => o.trim()).filter(Boolean);
+app.use(cors(corsOrigins?.length ? { origin: corsOrigins } : undefined));
+app.use(express.json({ limit: "100kb" }));
 
 // ── Super-Diagnostic Health Check ───────────────────────────
 
@@ -57,6 +64,13 @@ app.get("/health", async (_req, res) => {
     ]);
 
     const isOk = dbResult === true && redisResult === true && storageResult === true;
+
+    // Public callers (e.g. Render's health check) get only the overall status;
+    // connection errors and config hints are reserved for diagnostics access.
+    if (!canViewDiagnostics(_req)) {
+      res.status(200).json({ status: isOk ? "ok" : "degraded" });
+      return;
+    }
     const maskEnd = (val: string | undefined) => val ? `${val.substring(0, 15)}...` : "missing";
 
     res.status(200).json({
@@ -99,7 +113,7 @@ app.get("/health", async (_req, res) => {
 
 // ── Diagnostic Endpoints ────────────────────────────────────────
 
-app.get("/diagnostic", async (_req, res) => {
+app.get("/diagnostic", requireDiagnostics, async (_req, res) => {
   try {
     const result = await runDiagnostic();
     res.status(result.status === "healthy" ? 200 : result.status === "degraded" ? 200 : 503).json(result);
@@ -108,6 +122,8 @@ app.get("/diagnostic", async (_req, res) => {
     res.status(500).json({ status: "error", error: err.message });
   }
 });
+
+app.use("/debug", requireDiagnostics);
 
 app.get("/debug/predictions", (_req, res) => {
   const { getBugPredictions } = require("./utils/logger");
@@ -121,13 +137,16 @@ app.get("/debug/errors", (_req, res) => {
 
 // ── Actual API Routes ──────────────────────────────────────────
 
-app.use("/upload", uploadHandler);
+const perMinute = (name: string, envVar: string, fallback: number) =>
+  rateLimit({ name, windowMs: 60_000, max: parseInt(process.env[envVar] ?? "", 10) || fallback });
+
+app.use("/upload", perMinute("upload", "RATE_LIMIT_UPLOAD_PER_MIN", 10), uploadHandler);
 app.use("/status", statusHandler);
-app.use("/process", processHandler);
+app.use("/process", perMinute("process", "RATE_LIMIT_PROCESS_PER_MIN", 10), processHandler);
 app.use("/result", resultHandler);
 app.use("/cleanup", cleanupHandler);
 app.use("/debug", debugHandler);
-app.use("/chat", chatHandler);
+app.use("/chat", perMinute("chat", "RATE_LIMIT_CHAT_PER_MIN", 20), chatHandler);
 
 // 3. Sentry Error Handler (V10 Setup)
 Sentry.setupExpressErrorHandler(app);

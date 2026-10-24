@@ -36,7 +36,9 @@ LeaseGuardAI lets you upload a lease contract (PDF or image). A background worke
 | Local history | Results are saved in the browser's IndexedDB and listed on the History page. |
 | LeaseGuard Coach | A floating chat widget (`POST /chat`) backed by Gemini, which is given the current result as context. |
 | Self-healing jobs | Every 5 minutes, jobs stuck in `processing` for over 5 minutes are marked `failed` in PostgreSQL and Redis. |
-| Diagnostics | `/health`, `/diagnostic` and `/debug/*` report dependency status, queue length, worker heartbeat and error patterns. Sentry is initialised on both client and server. |
+| Diagnostics | `/health` returns `ok`/`degraded` publicly; full dependency status, `/diagnostic` and `/debug/*` (queue length, worker heartbeat, error patterns) need `DEBUG_TOKEN` in production. Sentry is initialised on both client and server. |
+| Abuse limits | Per-IP rate limits on `/upload`, `/process` and `/chat`; size caps on chat input; client-supplied AI endpoints must resolve to public addresses. |
+| File retention | Jobs older than `FILE_RETENTION_HOURS` (default 24) have their uploaded file and cached result deleted and are marked `deleted`. |
 
 ---
 
@@ -183,6 +185,12 @@ Import `n8n/workflows/ocr_pipeline.json` at http://localhost:5678 and set `N8N_W
 | `OLLAMA_HOST` | `localhost` | Hostname only; the worker calls `http://<OLLAMA_HOST>:11434` |
 | `N8N_WEBHOOK_URL`, `N8N_SECRET` | — | Optional n8n notification |
 | `DEBUG_FILE`, `LOG_DIR` | `false`, `./logs` | Write structured logs to files (read back by `/debug/logs`) |
+| `DEBUG_TOKEN` | — | Unlocks diagnostics (`X-Debug-Token` or `Authorization: Bearer` header). Without it, diagnostics are open in development and hidden (404) when `NODE_ENV=production` |
+| `RATE_LIMIT_UPLOAD_PER_MIN`, `RATE_LIMIT_PROCESS_PER_MIN`, `RATE_LIMIT_CHAT_PER_MIN` | `10`, `10`, `20` | Per-IP request limits (in memory, per instance) |
+| `TRUST_PROXY` | `1` in production | Express `trust proxy` setting, so rate limits see the real client IP behind Render's proxy |
+| `CORS_ORIGINS` | all origins | Comma-separated allow-list, e.g. your Firebase Hosting URL |
+| `ALLOW_PRIVATE_AI_ENDPOINTS` | `false` | Allow client-supplied `config.baseUrl` to point at private/loopback hosts (e.g. a local Ollama) |
+| `FILE_RETENTION_HOURS` | `24` | Age after which uploads and results are purged |
 
 ### Frontend (`frontend/.env`)
 
@@ -204,8 +212,8 @@ Never commit real `.env` files; they are git-ignored, and only the `.env.example
 | `GET` | `/result/:job_id` | — | `{ job_id, status: "completed", data: { sla, vin, price_estimate, fairness_score, negotiation_tips } }`; 202 still running, 422 failed, 410 deleted, 404 expired |
 | `DELETE` | `/cleanup/:job_id` | — | `{ job_id, status: "deleted", warnings? }` |
 | `POST` | `/chat` | `{ message, history?: [{ role, content }], contract_context? }` | `{ reply, tokens_used }` (`tokens_used` is the reply's character count, not a token count) |
-| `GET` | `/health` | — | Overall `ok`/`degraded` plus per-service status for PostgreSQL, Redis and storage |
-| `GET` | `/diagnostic`, `/debug`, `/debug/logs`, `/debug/health`, `/debug/predictions`, `/debug/errors` | — | Diagnostics (see Known limitations) |
+| `GET` | `/health` | — | `{ status: "ok" \| "degraded" }`; per-service details only with diagnostics access |
+| `GET` | `/diagnostic`, `/debug`, `/debug/logs`, `/debug/health`, `/debug/predictions`, `/debug/errors` | — | Diagnostics; require `DEBUG_TOKEN` in production |
 
 `vin` is always `null` at present, and `sla.apr` is always `null` because the current prompt does not extract APR.
 
@@ -238,7 +246,7 @@ CI (`.github/workflows/ci.yml`) runs these on every push and pull request to `ma
 
 - PostgreSQL stores only job metadata (id, status, engines, timestamps).
 - Results and statuses live in Redis with a TTL (24 h by default).
-- Uploaded files stay in the bucket until `DELETE /cleanup/:job_id` is called. The frontend does not call it, and no bucket lifecycle rule is configured, so add a lifecycle rule on the bucket if files should expire automatically.
+- Uploaded files are deleted by `DELETE /cleanup/:job_id`, or automatically by the worker once the job is older than `FILE_RETENTION_HOURS` (checked every 5 minutes).
 - Contract contents are sent to Google Gemini (or to the Ollama/custom endpoint you choose) for analysis.
 - Full results are also saved in the browser's IndexedDB.
 
@@ -246,12 +254,12 @@ CI (`.github/workflows/ci.yml`) runs these on every push and pull request to `ma
 
 ## Known limitations
 
-- **No authentication or rate limiting.** Anyone who can reach the API can upload, process and use `/chat`, which spends the server's Gemini quota. Job ids are random UUIDs, which is the only protection on `/status`, `/result` and `/cleanup`.
-- **Diagnostic endpoints are public.** `/health` shows partial hostnames and the database user; `/debug/*` shows queue and error details, and `/debug/logs` returns log entries when `DEBUG_FILE=true`.
-- **User-supplied endpoints.** With `ai: "ollama"` or `ai: "custom"`, the server makes requests to whatever `config.baseUrl` the client sends. Restrict or remove this if the API is exposed publicly.
+- **No user authentication.** Anyone who can reach the API can use it, within the per-IP rate limits. Job ids are random UUIDs, which is the only protection on `/status`, `/result` and `/cleanup`. Rate-limit counters are in memory, so they reset on restart and are per instance.
+- **User-supplied endpoints.** `config.baseUrl` is checked to resolve to public addresses and redirects are refused, but DNS can change between the check and the request (DNS rebinding).
+- **Frontend dependencies.** `npm audit` still reports advisories for Vite 5 (dev server only) and React Router 6; the fixes need major upgrades (Vite 8, React Router 7) that were not made here.
 - **Single worker.** Jobs run one at a time inside the API process, so a slow job delays the queue.
 - **Unused components.** `services/ai`, `services/ocr/*` and `services/shared` are not wired into the backend's processing path, and the UI exposes only Gemini.
-- CORS allows all origins.
+- CORS allows all origins unless `CORS_ORIGINS` is set.
 
 ---
 

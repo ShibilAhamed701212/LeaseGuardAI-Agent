@@ -7,6 +7,11 @@ const router = express.Router();
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
 
+// Bounds on what one request can send to Gemini (each call is billed to the server's key).
+const MAX_MESSAGE_CHARS = 4000;
+const MAX_HISTORY = 30;
+const MAX_CONTEXT_CHARS = 20_000;
+
 interface ChatMessage {
   role: "user" | "assistant";
   content: string;
@@ -40,6 +45,27 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
 
   if (!message || typeof message !== "string" || message.trim().length === 0) {
     res.status(400).json({ error: "message is required" });
+    return;
+  }
+
+  if (message.length > MAX_MESSAGE_CHARS) {
+    res.status(400).json({ error: `message must be at most ${MAX_MESSAGE_CHARS} characters` });
+    return;
+  }
+
+  if (history !== undefined && (
+    !Array.isArray(history) ||
+    history.length > MAX_HISTORY ||
+    !history.every((m) =>
+      m && (m.role === "user" || m.role === "assistant") &&
+      typeof m.content === "string" && m.content.length <= MAX_MESSAGE_CHARS)
+  )) {
+    res.status(400).json({ error: `history must be at most ${MAX_HISTORY} {role, content} messages` });
+    return;
+  }
+
+  if (contract_context && JSON.stringify(contract_context).length > MAX_CONTEXT_CHARS) {
+    res.status(400).json({ error: "contract_context is too large" });
     return;
   }
 
